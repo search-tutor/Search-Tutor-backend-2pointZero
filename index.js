@@ -42,6 +42,7 @@ async function run() {
     const tuitionRequestsCollection = db.collection("tuitionRequests");
     const jobsCollection = db.collection("jobs");
     const applicationsCollection = db.collection("applications");
+    const hireRequestsCollection = db.collection("hireRequests");
 
     // GET route to fetch all users
     // app.get("/users", async (req, res) => {
@@ -60,6 +61,7 @@ async function run() {
         const limit = parseInt(req.query.limit) || 12;
         const role = req.query.role;
         const search = req.query.search;
+        const city = req.query.city; // Add city parameter
 
         const filter = {};
 
@@ -67,22 +69,63 @@ async function run() {
           filter.accountType = role;
         }
 
+        if (city) {
+          filter.city = city;
+        }
+
         if (search) {
           filter.$or = [
             { name: { $regex: search, $options: "i" } },
-            { email: { $regex: search, $options: "i" } },
+            {
+              $expr: {
+                $regexMatch: {
+                  input: { $toString: "$_id" },
+                  regex: search,
+                  options: "i",
+                },
+              },
+            },
+            {
+              $expr: {
+                $regexMatch: {
+                  input: { $toString: "$tutorId" },
+                  regex: search,
+                  options: "i",
+                },
+              },
+            },
           ];
         }
 
         // Total matching users for current filter
         const totalUsers = await usersCollection.countDocuments(filter);
 
-        // Fetch paginated users
-        const users = await usersCollection
-          .find(filter)
-          .skip((page - 1) * limit)
-          .limit(limit)
-          .toArray();
+        // Fetch paginated users using an aggregation pipeline
+        const users = await usersCollection.aggregate([
+          { $match: filter },
+          {
+            $addFields: {
+              isVerified: { $ifNull: ["$isVerified", false] },
+              isRedVerified: { $ifNull: ["$isRedVerified", false] },
+            },
+          },
+          {
+            $addFields: {
+              sortPriority: {
+                $cond: {
+                  if: "$isVerified",
+                  then: 1,
+                  else: {
+                    $cond: { if: "$isRedVerified", then: 3, else: 2 },
+                  },
+                },
+              },
+            },
+          },
+          { $sort: { sortPriority: 1, _id: -1 } }, // Primary sort by priority, secondary by newest
+          { $skip: (page - 1) * limit },
+          { $limit: limit },
+        ]).toArray();
 
         const totalPages = Math.ceil(totalUsers / limit);
 
@@ -150,7 +193,19 @@ async function run() {
           location,
           accountType,
           image,
+          profileViews: 0, // Initialize profile views
+          class_1_5_details: "",
+          class_6_8_details: "",
+          class_10_12_details: "",
         };
+
+        // Generate a custom tutorId for tutors
+        if (accountType === 'tutor') {
+            const lastTutor = await usersCollection.find({ tutorId: { $exists: true } }).sort({ tutorId: -1 }).limit(1).toArray();
+            const newTutorId = lastTutor.length > 0 && lastTutor[0].tutorId ? lastTutor[0].tutorId + 1 : 10000;
+            newUser.tutorId = newTutorId;
+        }
+
         await usersCollection.insertOne(newUser);
         res.status(201).send(newUser);
       } catch (error) {
@@ -271,6 +326,50 @@ async function run() {
       }
     });
 
+    // PATCH route to update user's tab details
+    app.patch("/users/tab-details/:id", verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { class_1_5_details, class_6_8_details, class_10_12_details } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ success: false, message: "Invalid user ID format." });
+        }
+
+        // Construct an update object with only the fields provided in the request
+        const updateData = {};
+        if (class_1_5_details !== undefined) {
+          updateData.class_1_5_details = class_1_5_details;
+        }
+        if (class_6_8_details !== undefined) {
+          updateData.class_6_8_details = class_6_8_details;
+        }
+        if (class_10_12_details !== undefined) {
+          updateData.class_10_12_details = class_10_12_details;
+        }
+
+        // Check if there is anything to update
+        if (Object.keys(updateData).length === 0) {
+          return res.status(400).send({ success: false, message: "No details provided to update." });
+        }
+
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ success: false, message: "User not found." });
+        }
+
+        res.status(200).send({ success: true, message: "Tutor details updated successfully." });
+
+      } catch (error) {
+        console.error("Error updating tab details:", error);
+        res.status(500).send({ success: false, message: "Internal server error." });
+      }
+    });
+
     // Get a user by uid
     app.get("/users/:uid", verifyToken, async (req, res) => {
       try {
@@ -288,6 +387,50 @@ async function run() {
       }
     });
 
+    // Get a user by _id
+    app.get("/user-by-id/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        console.log('Fetching user by ID:', id); // Debugging log
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ error: "Invalid user ID format" });
+        }
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!user) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        res.send(user);
+      } catch (error) {
+        console.error("Error fetching user by ID:", error);
+        res.status(500).send({ error: "Failed to fetch user" });
+      }
+    });
+
+    // Increment profile view count
+    app.patch("/users/:id/increment-view", async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+          // Silently fail if ID is invalid
+          return res.status(200).send({ success: false });
+        }
+
+        // Fire-and-forget update
+        usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $inc: { profileViews: 1 } }
+        );
+
+        res.status(200).send({ success: true });
+      } catch (error) {
+        // Don't send error to client, just log it
+        console.error("Error incrementing profile view count:", error);
+        res.status(200).send({ success: false }); // Still send success to not block client
+      }
+    });
+
     // PATCH route to update user's accountType
     app.patch("/users/:uid/accountType", verifyToken, async (req, res) => {
       try {
@@ -298,12 +441,27 @@ async function run() {
           return res.status(400).send({ error: "Missing accountType" });
         }
 
+        const user = await usersCollection.findOne({ uid });
+        if (!user) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        const updateData = { accountType };
+
+        // If becoming a tutor and doesn't have a tutorId, generate one
+        if (accountType === 'tutor' && !user.tutorId) {
+          const lastTutor = await usersCollection.find({ tutorId: { $exists: true } }).sort({ tutorId: -1 }).limit(1).toArray();
+          const newTutorId = lastTutor.length > 0 && lastTutor[0].tutorId ? lastTutor[0].tutorId + 1 : 10000;
+          updateData.tutorId = newTutorId;
+        }
+
         const result = await usersCollection.updateOne(
           { uid },
-          { $set: { accountType } }
+          { $set: updateData }
         );
 
         if (result.matchedCount === 0) {
+          // This case should technically not be hit due to the findOne check above, but for safety:
           return res.status(404).send({ error: "User not found" });
         }
 
@@ -469,6 +627,536 @@ async function run() {
         }
       }
     );
+
+    // POST: Create a new hire request from a guardian
+    app.post("/hire-requests", verifyToken, async (req, res) => {
+      try {
+        const guardianUid = req.user.uid; // Get guardian's UID from verified token
+        const { 
+          tutorId, 
+          teacherSalary, 
+          studentClass, 
+          subjects, 
+          daysPerWeek, 
+          tuitionDuration, 
+          availableTime, 
+          requiredExperience, 
+          guardianAddress, 
+          guardianNumber 
+        } = req.body;
+
+        // Basic validation
+        if (!tutorId || !teacherSalary || !studentClass || !subjects || !guardianAddress || !guardianNumber) {
+          return res.status(400).send({ success: false, message: "Missing required fields." });
+        }
+
+        // Auto-incrementing hireRequestId
+        const lastRequest = await hireRequestsCollection
+          .find()
+          .sort({ hireRequestId: -1 })
+          .limit(1)
+          .toArray();
+        const hireRequestId = lastRequest.length > 0 && lastRequest[0].hireRequestId ? lastRequest[0].hireRequestId + 1 : 10000;
+
+        const newHireRequest = {
+          hireRequestId, // Add the sequential ID
+          tutorId,       // The ID of the tutor being hired
+          guardianUid, // The UID of the guardian making the request
+          teacherSalary,
+          studentClass,
+          subjects,
+          daysPerWeek,
+          tuitionDuration,
+          availableTime,
+          requiredExperience,
+          guardianAddress,
+          guardianNumber,
+          status: "pending", // Initial status
+          demoClassStatus: "pending",
+          createdAt: new Date(),
+        };
+
+        const result = await hireRequestsCollection.insertOne(newHireRequest);
+
+        res.status(201).send({
+          success: true,
+          message: "Hire request submitted successfully.",
+          insertedId: result.insertedId,
+        });
+
+      } catch (error) {
+        console.error("Error creating hire request:", error);
+        res.status(500).send({ success: false, message: "Failed to submit hire request." });
+      }
+    });
+
+    // GET: Get all hire requests for the currently logged-in tutor
+    app.get("/my-hire-requests", verifyToken, async (req, res) => {
+      try {
+        const tutorUid = req.user.uid;
+
+        // First, find the tutor user to get their MongoDB _id
+        const tutor = await usersCollection.findOne({ uid: tutorUid });
+        if (!tutor || tutor.accountType !== 'tutor') {
+          return res.status(403).send({ success: false, message: "Access denied. User is not a tutor." });
+        }
+
+        const tutorId = tutor._id.toString(); // Use the MongoDB _id as the reference
+
+        const requests = await hireRequestsCollection.aggregate([
+          {
+            $match: { tutorId: tutorId } // Match requests for this tutor
+          },
+          {
+            $lookup: {
+              from: "users", // The collection to join with
+              localField: "guardianUid", // Field from the hireRequests collection
+              foreignField: "uid", // Field from the users collection
+              as: "guardianDetails" // Output array field name
+            }
+          },
+          {
+            $unwind: "$guardianDetails" // Deconstruct the guardianDetails array
+          },
+          {
+            $sort: { createdAt: -1 } // Show newest requests first
+          }
+        ]).toArray();
+
+        res.status(200).send({ success: true, data: requests });
+
+      } catch (error) {
+        console.error("Error fetching hire requests:", error);
+        res.status(500).send({ success: false, message: "Failed to fetch hire requests." });
+      }
+    });
+
+        // PATCH: Update hire request status (accept, reject, pend)
+        app.patch("/hire-requests/:id/status", verifyToken, async (req, res) => {
+          try {
+            const { id } = req.params;
+            const { status: newStatus, rejectionReason } = req.body; // newStatus will be 'accepted', 'rejected', or 'pending'
+            const userUid = req.user.uid;
+    
+            // 1. Validate input
+            if (!['accepted', 'rejected', 'pending'].includes(newStatus)) {
+              return res.status(400).send({ success: false, message: "Invalid status provided." });
+            }
+    
+            if (!ObjectId.isValid(id)) {
+              return res.status(400).send({ success: false, message: "Invalid request ID." });
+            }
+    
+            // 2. Find the request
+            const request = await hireRequestsCollection.findOne({ _id: new ObjectId(id) });
+            if (!request) {
+              return res.status(404).send({ success: false, message: "Hire request not found." });
+            }
+    
+            // 3. Authorization Check
+            const requestingUser = await usersCollection.findOne({ uid: userUid });
+            if (!requestingUser || (requestingUser.accountType !== 'admin' && request.tutorId !== requestingUser._id.toString())) {
+              return res.status(403).send({ success: false, message: "You are not authorized to perform this action." });
+            }
+    
+            // 4. Prepare the update document
+            const updateDoc = {
+              $set: { status: newStatus, updatedAt: new Date() }
+            };
+            // If status is rejected, add the rejection reason
+            if (newStatus === 'rejected' && rejectionReason) {
+                updateDoc.$set.rejectionReason = rejectionReason;
+            };
+    
+            // Add a trackingId if the request is being accepted for the first time
+            if (newStatus === 'accepted' && !request.trackingId) {
+              updateDoc.$set.trackingId = new ObjectId().toString();
+            }
+    
+            // 5. Perform the update
+            const result = await hireRequestsCollection.updateOne(
+              { _id: new ObjectId(id) },
+              updateDoc
+            );
+    
+            if (result.modifiedCount === 0 && result.matchedCount === 0) {
+                 return res.status(404).send({ success: false, message: "Hire request not found." });
+            }
+            
+            // If status is the same, it's not an error.
+            if (result.modifiedCount === 0 && result.matchedCount === 1) {
+                return res.status(200).send({ success: true, message: `Request status is already ${newStatus}.` });
+            }
+    
+            // 6. Send success response
+            const updatedRequest = await hireRequestsCollection.findOne({ _id: new ObjectId(id) });
+            res.status(200).send({ 
+                success: true, 
+                message: `Request has been ${newStatus}.`,
+                data: updatedRequest 
+            });
+    
+          } catch (error) {
+            console.error(`Error updating hire request status:`, error);
+            res.status(500).send({ success: false, message: `Failed to update hire request.` });
+          }
+        });
+    // GET: Get ALL hire requests (Admin only) with pagination and filtering
+    app.get("/all-hire-requests", verifyToken, async (req, res) => {
+      try {
+        // Admin role verification
+        const requestingUser = await usersCollection.findOne({ uid: req.user.uid });
+        if (!requestingUser || requestingUser.accountType !== 'admin') {
+          return res.status(403).send({ success: false, message: "Access denied. Admin role required." });
+        }
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        // Filters
+        const { status, tutorSearch, guardianSearch, hireRequestIdSearch } = req.query;
+
+        let aggregationPipeline = [];
+
+        // Initial match for fields in hireRequestsCollection
+        const initialMatch = {};
+        if (hireRequestIdSearch) {
+            const numericId = parseInt(hireRequestIdSearch, 10);
+            if (!isNaN(numericId)) {
+                initialMatch.hireRequestId = numericId;
+            }
+        }
+        if (status) {
+          initialMatch.status = status;
+        }
+        if (Object.keys(initialMatch).length > 0) {
+            aggregationPipeline.push({ $match: initialMatch });
+        }
+        
+        // Add sorting
+        aggregationPipeline.push({ $sort: { createdAt: -1 } });
+
+        // Lookups
+        aggregationPipeline.push(
+            { $addFields: { tutorObjectId: { $toObjectId: "$tutorId" } } },
+            { $lookup: { from: "users", localField: "guardianUid", foreignField: "uid", as: "guardianDetails" } },
+            { $lookup: { from: "users", localField: "tutorObjectId", foreignField: "_id", as: "tutorDetails" } },
+            { $unwind: { path: "$guardianDetails", preserveNullAndEmptyArrays: true } },
+            { $unwind: { path: "$tutorDetails", preserveNullAndEmptyArrays: true } }
+        );
+
+        // Secondary match for fields from looked-up collections
+        const secondaryMatch = {};
+        if (tutorSearch) {
+            secondaryMatch['tutorDetails.name'] = { $regex: tutorSearch, $options: 'i' };
+        }
+        if (guardianSearch) {
+            secondaryMatch['guardianDetails.name'] = { $regex: guardianSearch, $options: 'i' };
+        }
+         if (Object.keys(secondaryMatch).length > 0) {
+            aggregationPipeline.push({ $match: secondaryMatch });
+        }
+
+        // Add a projection to exclude sensitive fields and ensure hireRequestId is present
+        aggregationPipeline.push({
+            $project: {
+                // Exclude sensitive fields
+                "guardianDetails.password": 0, 
+                "tutorDetails.password": 0,
+                // You can add other fields to exclude here if needed
+            }
+            // Since we are only excluding, all other fields, including hireRequestId,
+            // will be passed through automatically. If you were including fields,
+            // you would need to explicitly add `hireRequestId: 1`.
+            // This exclusion-only approach is safer to ensure new fields are not missed.
+        });
+
+        // Facet for pagination
+        aggregationPipeline.push({
+          $facet: {
+            paginatedResults: [{ $skip: skip }, { $limit: limit }],
+            totalCount: [{ $count: 'count' }]
+          }
+        });
+
+        const result = await hireRequestsCollection.aggregate(aggregationPipeline).toArray();
+
+        const requests = result[0].paginatedResults;
+        const totalCount = result[0].totalCount.length > 0 ? result[0].totalCount[0].count : 0;
+        const totalPages = Math.ceil(totalCount / limit);
+
+        res.status(200).send({
+          success: true,
+          data: requests,
+          pagination: { totalCount, totalPages, currentPage: page, limit }
+        });
+
+      } catch (error) {
+        console.error("Error fetching all hire requests:", error);
+        res.status(500).send({ success: false, message: "Failed to fetch hire requests." });
+      }
+    });
+
+    // GET: Get all accepted hire requests for the currently logged-in guardian
+    app.get("/my-hired-tutors", verifyToken, async (req, res) => {
+      try {
+        const guardianUid = req.user.uid;
+
+        const requests = await hireRequestsCollection.aggregate([
+          {
+            $match: { 
+              guardianUid: guardianUid
+            }
+          },
+          {
+            $addFields: {
+              tutorObjectId: { $toObjectId: "$tutorId" } 
+            }
+          },
+          {
+            $lookup: {
+              from: "users",
+              localField: "tutorObjectId",
+              foreignField: "_id",
+              as: "tutorDetails"
+            }
+          },
+          {
+            $unwind: "$tutorDetails"
+          },
+          {
+            $project: {
+              _id: 1,
+              status: 1,
+              subjects: 1,
+              teacherSalary: 1,
+              guardianUid: 1,
+              tutorId: 1,
+              createdAt: 1,
+              updatedAt: 1,
+              trackingId: 1, // Add trackingId here
+              rejectionReason: 1, // Add rejectionReason here
+              "tutorDetails.name": 1,
+              "tutorDetails.image": 1,
+              "tutorDetails.institute": 1,
+              "tutorDetails.tutorId": 1,
+              "tutorDetails.phone": 1,
+              "tutorDetails.email": 1,
+              "tutorDetails.department": 1,
+              "tutorDetails.location": 1,
+              "tutorDetails._id": 1
+            }
+          },
+          {
+            $sort: { updatedAt: -1 } // Show most recently accepted first
+          }
+        ]).toArray();
+
+        res.status(200).send({ success: true, data: requests });
+
+      } catch (error) {
+        console.error("Error fetching hired tutors:", error);
+        res.status(500).send({ success: false, message: "Failed to fetch hired tutors." });
+      }
+    });
+
+    // GET: Get hire request details by trackingId (Publicly accessible)
+    app.get("/hire-requests/track/:trackingId", async (req, res) => {
+      try {
+        const { trackingId } = req.params;
+
+        const request = await hireRequestsCollection.aggregate([
+          {
+            $match: { trackingId: trackingId }
+          },
+          {
+            $addFields: {
+              tutorObjectId: { $toObjectId: "$tutorId" } 
+            }
+          },
+          {
+            $lookup: {
+              from: "users",
+              localField: "tutorObjectId",
+              foreignField: "_id",
+              as: "tutorDetails"
+            }
+          },
+          {
+            $unwind: { path: "$tutorDetails", preserveNullAndEmptyArrays: true }
+          },
+          {
+            $project: {
+              _id: 1,
+              status: 1,
+              subjects: 1,
+              teacherSalary: 1,
+              guardianUid: 1,
+              tutorId: 1,
+              createdAt: 1,
+              updatedAt: 1,
+              trackingId: 1,
+              "tutorDetails.name": 1,
+              "tutorDetails.image": 1,
+              "tutorDetails.institute": 1,
+              "tutorDetails.tutorId": 1,
+              "tutorDetails.phone": 1,
+              "tutorDetails.email": 1,
+              "tutorDetails.department": 1,
+              "tutorDetails.location": 1,
+              "tutorDetails._id": 1
+            }
+          }
+        ]).toArray();
+
+        if (request.length === 0) {
+          return res.status(404).send({ success: false, message: "Tracking ID not found." });
+        }
+
+        res.status(200).send({ success: true, data: request[0] });
+
+      } catch (error) {
+        console.error("Error fetching hire request by tracking ID:", error);
+        res.status(500).send({ success: false, message: "Failed to fetch hire request." });
+      }
+    });
+
+    // GET: Get full tracking details by trackingId (for tracking page)
+    app.get('/tracking/:trackingId', async (req, res) => {
+      try {
+          const { trackingId } = req.params;
+
+          // The query should find the document where the 'trackingId' field matches.
+          const hireRequest = await hireRequestsCollection.findOne({ trackingId: trackingId });
+
+          if (!hireRequest) {
+              return res.status(404).send({ success: false, message: 'Tracking session not found.' });
+          }
+
+          // Fetch tutor and guardian details
+          const tutor = await usersCollection.findOne({ _id: new ObjectId(hireRequest.tutorId) });
+          const guardian = await usersCollection.findOne({ uid: hireRequest.guardianUid });
+
+          res.status(200).send({
+              success: true,
+              data: {
+                  ...hireRequest,
+                  tutorDetails: { name: tutor?.name, _id: tutor?._id },
+                  guardianDetails: { name: guardian?.name, _id: guardian?._id }
+              }
+          });
+
+      } catch (error) {
+          console.error("Error fetching tracking details:", error);
+          res.status(500).send({ success: false, message: "Failed to fetch tracking details." });
+      }
+    });
+
+    // POST: Add an update to a tracking session
+    app.post('/tracking/:trackingId/update', verifyToken, async (req, res) => {
+      try {
+          const { trackingId } = req.params;
+          const { message } = req.body;
+          const requestingUserUid = req.user.uid;
+
+          if (!message || typeof message !== 'string' || message.trim() === '') {
+              return res.status(400).send({ success: false, message: 'Update message is required.' });
+          }
+
+          // Find the hire request using the string trackingId
+          const hireRequest = await hireRequestsCollection.findOne({ trackingId: trackingId });
+
+          if (!hireRequest) {
+              return res.status(404).send({ success: false, message: 'Tracking session not found.' });
+          }
+
+          // Find the user who is making the request
+          const requestingUser = await usersCollection.findOne({ uid: requestingUserUid });
+          if (!requestingUser) {
+              return res.status(404).send({ success: false, message: 'Requesting user not found.' });
+          }
+
+          // Find the assigned tutor for this hire request
+          const tutorUser = await usersCollection.findOne({ _id: new ObjectId(hireRequest.tutorId) });
+
+          // Authorize if the user is an admin OR the assigned tutor
+          if (requestingUser.accountType !== 'admin' && (!tutorUser || tutorUser.uid !== requestingUserUid)) {
+              return res.status(403).send({ success: false, message: 'You are not authorized to post updates for this session.' });
+          }
+
+          const newUpdate = {
+              _id: new ObjectId(),
+              message: message.trim(),
+              timestamp: new Date(),
+              author: { name: requestingUser.name } // Store author's name (can be tutor or admin)
+          };
+
+          const result = await hireRequestsCollection.updateOne(
+              { trackingId: trackingId }, // Find by trackingId to update
+              { $push: { updates: newUpdate } }
+          );
+
+          if (result.modifiedCount === 0) {
+              return res.status(500).send({ success: false, message: 'Failed to post the update.' });
+          }
+
+          res.status(201).send({ success: true, message: 'Update posted successfully.', data: newUpdate });
+
+      } catch (error) {
+          console.error("Error posting tracking update:", error);
+          res.status(500).send({ success: false, message: "Failed to post tracking update." });
+      }
+    });
+
+    // PATCH: Update demo class status
+    app.patch("/hire-requests/:trackingId/demo-status", verifyToken, async (req, res) => {
+      try {
+        const { trackingId } = req.params;
+        const { status } = req.body;
+        const requestingUserUid = req.user.uid;
+
+        if (!['confirmed', 'canceled'].includes(status)) {
+          return res.status(400).send({ success: false, message: 'Invalid status.' });
+        }
+
+        const hireRequest = await hireRequestsCollection.findOne({ trackingId: trackingId });
+
+        if (!hireRequest) {
+          return res.status(404).send({ success: false, message: 'Hire request not found.' });
+        }
+
+        // Find the user who is making the request
+        const requestingUser = await usersCollection.findOne({ uid: requestingUserUid });
+        if (!requestingUser) {
+            return res.status(404).send({ success: false, message: 'Requesting user not found.' });
+        }
+
+        // Find the assigned tutor for this hire request
+        const tutorUser = await usersCollection.findOne({ _id: new ObjectId(hireRequest.tutorId) });
+
+        // Authorize if the user is an admin OR the assigned tutor
+        if (requestingUser.accountType !== 'admin' && (!tutorUser || tutorUser.uid !== requestingUserUid)) {
+            return res.status(403).send({ success: false, message: 'You are not authorized to update this hire request.' });
+        }
+
+        const result = await hireRequestsCollection.updateOne(
+          { trackingId: trackingId },
+          { $set: { demoClassStatus: status } }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(500).send({ success: false, message: 'Failed to update demo class status.' });
+        }
+
+        res.status(200).send({ success: true, message: `Demo class status updated to ${status}.` });
+
+      } catch (error) {
+        console.error("Error updating demo class status:", error);
+        res.status(500).send({ success: false, message: "Failed to update demo class status." });
+      }
+    });
+
 
     // job-requests
 
