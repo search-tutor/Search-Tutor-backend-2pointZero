@@ -6,11 +6,22 @@ const cors = require("cors");
 const port = process.env.PORT || 4000;
 
 // middleware
+const allowedOrigins = [
+  //'http://localhost:5173',
+  'https://searchtutorbd.com'
+  // আপনি এখানে আপনার অন্যান্য ফ্রন্টএন্ড URL যোগ করতে পারেন
+];
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://searchtutorbd.com'
-  ],
+  origin: function (origin, callback) {
+    // মোবাইল অ্যাপ বা cURL রিকুয়েস্টের মতো অরিজিন ছাড়া রিকুয়েস্ট Allow করুন
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
   credentials: true
 }));
 app.use(express.json());
@@ -35,7 +46,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
+    await client.connect(); // Explicitly connect to MongoDB
 
     const db = client.db("searchTeacherDb"); // Use your DB name
     const usersCollection = db.collection("users");
@@ -609,6 +620,11 @@ async function run() {
       async (req, res) => {
         const { id } = req.params;
         const { isCalled } = req.body;
+
+        // Add ObjectId validation
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ success: false, error: "Invalid ID format." });
+        }
 
         try {
           const result = await tuitionRequestsCollection.updateOne(
@@ -1348,13 +1364,13 @@ async function run() {
     // GET a single job post by ID
     app.get("/jobs/:id", async (req, res) => {
       try {
-        const id = req.params.id;
+        const { id } = req.params;
 
         // More robust check for a valid 24-character hex string ObjectId
         if (!ObjectId.isValid(id) || String(id).length !== 24) {
           return res.status(400).send({
             success: false,
-            message: "Invalid job ID format. It must be a 24 character hex string.",
+            message: "Invalid job ID format.",
           });
         }
 
@@ -1385,6 +1401,11 @@ async function run() {
     app.delete("/jobs/:id", async (req, res) => {
       try {
         const id = req.params.id;
+
+        // Add ObjectId validation for robustness
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ success: false, message: "Invalid ID format." });
+        }
 
         const result = await jobsCollection.deleteOne({
           _id: new ObjectId(id),
@@ -1445,25 +1466,25 @@ async function run() {
     app.put("/applications/:id", async (req, res) => {
       try {
         const { id } = req.params;
-        const { reason, comments, } = req.body;
+        const { reason, comments } = req.body;
 
         if (!["Pending", "Cancel", "Appointed"].includes(reason)) {
           return res.status(400).send({ success: false, error: "Invalid reason" });
         }
 
-        const result = await jobsCollection.updateOne(
-          { _id: new ObjectId(id) },
+        // BUG FIX: This endpoint should update the 'applications' collection, not 'jobs'.
+        const result = await applicationsCollection.updateOne(
+          { _id: new ObjectId(id) }, // Find the application by its own _id
           {
             $set: {
-              status: reason,
-              feedback: comments,
-              updatedAt: new Date()
-            }
+              status: reason, // Update the application's status
+              feedback: comments, // Add feedback to the application
+              updatedAt: new Date(),
+            },
           }
         );
-
         if (result.matchedCount === 0) {
-          return res.status(404).send({ success: false, error: "Job not found" });
+          return res.status(404).send({ success: false, error: "Application not found" });
         }
 
         res.send({ success: true, updatedFields: { status: reason, feedback: comments } });
@@ -1713,7 +1734,7 @@ async function run() {
 
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
-    console.log(
+    console.log( // This log will now appear after explicit connection
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
   } finally {
