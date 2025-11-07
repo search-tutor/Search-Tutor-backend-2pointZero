@@ -46,7 +46,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect(); // Explicitly connect to MongoDB
+    // await client.connect();
 
     const db = client.db("searchTeacherDb"); // Use your DB name
     const usersCollection = db.collection("users");
@@ -620,11 +620,6 @@ async function run() {
       async (req, res) => {
         const { id } = req.params;
         const { isCalled } = req.body;
-
-        // Add ObjectId validation
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({ success: false, error: "Invalid ID format." });
-        }
 
         try {
           const result = await tuitionRequestsCollection.updateOne(
@@ -1364,13 +1359,13 @@ async function run() {
     // GET a single job post by ID
     app.get("/jobs/:id", async (req, res) => {
       try {
-        const { id } = req.params;
+        const id = req.params.id;
 
         // More robust check for a valid 24-character hex string ObjectId
         if (!ObjectId.isValid(id) || String(id).length !== 24) {
           return res.status(400).send({
             success: false,
-            message: "Invalid job ID format.",
+            message: "Invalid job ID format. It must be a 24 character hex string.",
           });
         }
 
@@ -1401,11 +1396,6 @@ async function run() {
     app.delete("/jobs/:id", async (req, res) => {
       try {
         const id = req.params.id;
-
-        // Add ObjectId validation for robustness
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({ success: false, message: "Invalid ID format." });
-        }
 
         const result = await jobsCollection.deleteOne({
           _id: new ObjectId(id),
@@ -1466,25 +1456,25 @@ async function run() {
     app.put("/applications/:id", async (req, res) => {
       try {
         const { id } = req.params;
-        const { reason, comments } = req.body;
+        const { reason, comments, } = req.body;
 
         if (!["Pending", "Cancel", "Appointed"].includes(reason)) {
           return res.status(400).send({ success: false, error: "Invalid reason" });
         }
 
-        // BUG FIX: This endpoint should update the 'applications' collection, not 'jobs'.
-        const result = await applicationsCollection.updateOne(
-          { _id: new ObjectId(id) }, // Find the application by its own _id
+        const result = await jobsCollection.updateOne(
+          { _id: new ObjectId(id) },
           {
             $set: {
-              status: reason, // Update the application's status
-              feedback: comments, // Add feedback to the application
-              updatedAt: new Date(),
-            },
+              status: reason,
+              feedback: comments,
+              updatedAt: new Date()
+            }
           }
         );
+
         if (result.matchedCount === 0) {
-          return res.status(404).send({ success: false, error: "Application not found" });
+          return res.status(404).send({ success: false, error: "Job not found" });
         }
 
         res.send({ success: true, updatedFields: { status: reason, feedback: comments } });
@@ -1734,7 +1724,7 @@ async function run() {
 
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
-    console.log( // This log will now appear after explicit connection
+    console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
   } finally {
