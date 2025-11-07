@@ -1287,10 +1287,7 @@ async function run() {
     app.get("/jobs/notifications/:city", async (req, res) => {
       try {
         const userCity = req.params.city;
-        // Prevent query if the parameter is literally the string "undefined"
-        if (!userCity || userCity === 'undefined') {
-          return res.status(400).send({ success: false, error: "A valid city is required." });
-        }
+        if (!userCity) return res.status(400).send({ success: false, error: "City is required" });
 
         // Fetch the 6 most recent jobs matching user's city
         const jobs = await jobsCollection
@@ -1305,7 +1302,6 @@ async function run() {
         res.status(500).send({ success: false, error: "Failed to fetch notifications" });
       }
     });
-    
 
 
 
